@@ -17,7 +17,6 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 COOLDOWN = 0.05
 DAYS_BACK = 80
-MIN_SCORE = 50
 
 # ===============================
 # LOAD UNIVERSE
@@ -99,32 +98,40 @@ def rsi(series, n=14):
     return 100 - (100 / (1 + rs))
 
 # ===============================
-# SCORE PRO
+# SCORE PRO (AMÉLIORÉ)
 # ===============================
 def score_stock_pro(ha):
+
     latest = ha.iloc[-1]
     prev = ha.iloc[-2]
     reds = ha.iloc[-4:-1]
 
     score = 0
 
-    if latest["RSI"] < 35 and latest["RSI"] > prev["RSI"]:
-        score += 25
-    elif latest["RSI"] < 40:
-        score += 15
+    # 🔥 RSI (clé)
+    rsi_val = latest["RSI"]
 
-    score += 15
-
-    if latest["Close"] > reds["High"].max():
+    if rsi_val < 10:
+        score += 40
+    elif rsi_val < 15:
+        score += 35
+    elif rsi_val < 20:
+        score += 30
+    elif rsi_val < 25:
+        score += 20
+    elif rsi_val < 30:
         score += 10
 
+    # 🔹 force rebond
+    move = (latest["Close"] - reds.iloc[-1]["Close"]) / reds.iloc[-1]["Close"]
+    score += min(move * 100, 20)
+
+    # 🔹 EMA20
     dist_ema = (latest["Close"] - latest["EMA20"]) / latest["EMA20"]
     if dist_ema > 0:
-        score += 10
+        score += min(dist_ema * 100, 15)
 
-    if latest["EMA20"] > ha["EMA20"].iloc[-5]:
-        score += 10
-
+    # 🔹 RR
     entry = latest["Close"]
     stop = reds["Low"].min()
     risk = entry - stop
@@ -132,18 +139,14 @@ def score_stock_pro(ha):
     if risk > 0:
         tp = entry + 2 * risk
         rr = (tp - entry) / risk
-        if rr >= 2:
-            score += 10
+        score += min((rr - 2) * 25, 10)
 
+    # 🔹 capitulation
     recent_low = ha["Low"].rolling(20).min().iloc[-1]
-    if entry > recent_low * 1.05:
-        score += 10
+    bounce = (entry - recent_low) / recent_low
+    score += min(bounce * 100, 10)
 
-    dist_200 = (entry / ha["EMA200"].iloc[-1]) - 1
-    if 0 < dist_200 < 0.15:
-        score += 10
-
-    return min(score, 100)
+    return round(score, 1)
 
 # ===============================
 # ANALYSIS
@@ -151,16 +154,16 @@ def score_stock_pro(ha):
 def tea_analysis(score):
 
     if score >= 80:
-        return "Pression acheteuse nette après excès vendeur."
+        return "Reversal puissant avec pression acheteuse claire."
 
     elif score >= 65:
-        return "Rebond structuré avec acheteurs en contrôle."
+        return "Rebond structuré avec bon potentiel."
 
-    elif score >= 55:
+    elif score >= 50:
         return "Tentative de retournement encore fragile."
 
     else:
-        return "Setup faible avec peu de conviction."
+        return "Setup faible."
 
 # ===============================
 # MACRO AI
@@ -173,11 +176,10 @@ def generate_macro(top7):
         prompt = f"""
 Tu es un analyste financier.
 
-Voici les meilleurs setups de renversement aujourd'hui:
+Voici les meilleurs setups:
 {tickers}
 
 Donne UNE phrase courte décrivant le marché.
-Max 20 mots. Ton professionnel.
 """
 
         response = client.chat.completions.create(
@@ -189,21 +191,24 @@ Max 20 mots. Ton professionnel.
         return response.choices[0].message.content.strip()
 
     except:
-        return "Marché en phase de stabilisation avec opportunités de rebonds techniques."
+        return "Marché en phase de stabilisation avec opportunités de rebond."
 
 # ===============================
 # DISCORD
 # ===============================
 def send_discord(msg):
     try:
-        requests.post(DISCORD_WEBHOOK, json={"content": msg}, timeout=5)
-    except:
-        pass
+        r = requests.post(DISCORD_WEBHOOK, json={"content": msg}, timeout=5)
+        print("Discord status:", r.status_code)
+    except Exception as e:
+        print("Erreur Discord:", e)
 
 # ===============================
 # MAIN
 # ===============================
 def main():
+
+    print("Webhook:", DISCORD_WEBHOOK)
 
     tickers = load_russell_universe()
     results = []
@@ -231,25 +236,26 @@ def main():
             ):
 
                 score = score_stock_pro(ha)
+                analysis = tea_analysis(score)
 
-                if score >= MIN_SCORE:
-
-                    analysis = tea_analysis(score)
-
-                    results.append({
-                        "Ticker": ticker,
-                        "Score": score,
-                        "Analysis": analysis
-                    })
+                results.append({
+                    "Ticker": ticker,
+                    "Score": score,
+                    "Analysis": analysis
+                })
 
         if i % 50 == 0:
             print(f"{i} tickers traités")
 
         time.sleep(COOLDOWN)
 
-    if results:
+    print(f"Total setups trouvés: {len(results)}")
 
-        df_results = pd.DataFrame(results).sort_values("Score", ascending=False).head(7)
+    if len(results) > 0:
+
+        df_results = pd.DataFrame(results)\
+            .sort_values("Score", ascending=False)\
+            .head(7)
 
         macro = generate_macro(df_results)
 
@@ -262,7 +268,9 @@ def main():
         send_discord(report)
 
     else:
-        print("Aucun signal détecté aujourd’hui")
+        msg = "🟫 TEA REVERSAL\n\nAucun pattern détecté aujourd’hui."
+        print(msg)
+        send_discord(msg)
 
 # ===============================
 # RUN
