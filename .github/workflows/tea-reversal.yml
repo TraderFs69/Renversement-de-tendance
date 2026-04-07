@@ -1,0 +1,47 @@
+name: TEA Reversal Scanner
+
+on:
+  schedule:
+    # 20h15 Québec = 00h15 UTC
+    - cron: '15 0 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout repo
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. Setup Python
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 3. Install dependencies
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 4. Run script
+      - name: Run TEA Scanner
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python bot.py
+
+      # 5. Optional log success
+      - name: Success message
+        if: success()
+        run: echo "Scan exécuté avec succès"
+
+      # 6. Optional log failure
+      - name: Failure message
+        if: failure()
+        run: echo "Erreur durant l'exécution du bot"
