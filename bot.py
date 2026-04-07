@@ -1,6 +1,7 @@
 import time
 import os
 from datetime import date, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import requests
@@ -15,23 +16,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-COOLDOWN = 0.05
 DAYS_BACK = 80
-
-# ===============================
-# LOAD UNIVERSE
-# ===============================
-def load_russell_universe():
-    df = pd.read_excel("russell3000_constituents.xlsx")
-    syms = (
-        df["Symbol"]
-        .dropna()
-        .astype(str)
-        .str.upper()
-        .str.strip()
-        .tolist()
-    )
-    return sorted(set(s.replace(".", "-") for s in syms if s))
 
 # ===============================
 # FETCH DATA
@@ -58,8 +43,8 @@ def fetch_polygon(ticker):
             return None
 
         df = pd.DataFrame(data["results"])
-        df.rename(columns={"o": "Open", "h": "High", "l": "Low", "c": "Close"}, inplace=True)
-        return df[["Open", "High", "Low", "Close"]]
+        df.rename(columns={"o": "Open", "h": "High", "l": "Low", "c": "Close", "v": "Volume"}, inplace=True)
+        return df[["Open", "High", "Low", "Close", "Volume"]]
 
     except:
         return None
@@ -98,52 +83,45 @@ def rsi(series, n=14):
     return 100 - (100 / (1 + rs))
 
 # ===============================
-# SCORE PRO (AMÉLIORÉ)
+# SCORE ELITE
 # ===============================
-def score_stock_pro(ha):
+def score_stock_elite(ha, df):
 
     latest = ha.iloc[-1]
-    prev = ha.iloc[-2]
     reds = ha.iloc[-4:-1]
 
     score = 0
 
-    # 🔥 RSI (clé)
     rsi_val = latest["RSI"]
 
     if rsi_val < 10:
-        score += 40
-    elif rsi_val < 15:
         score += 35
-    elif rsi_val < 20:
+    elif rsi_val < 15:
         score += 30
+    elif rsi_val < 20:
+        score += 25
     elif rsi_val < 25:
-        score += 20
+        score += 15
     elif rsi_val < 30:
+        score += 5
+
+    move = (latest["Close"] - reds.iloc[-1]["Close"]) / reds.iloc[-1]["Close"]
+    score += min(move * 120, 20)
+
+    vol = df["Volume"].iloc[-1]
+    vol_ma = df["Volume"].rolling(20).mean().iloc[-1]
+
+    if vol > 1.5 * vol_ma:
+        score += 15
+    elif vol > 1.2 * vol_ma:
         score += 10
 
-    # 🔹 force rebond
-    move = (latest["Close"] - reds.iloc[-1]["Close"]) / reds.iloc[-1]["Close"]
-    score += min(move * 100, 20)
-
-    # 🔹 EMA20
     dist_ema = (latest["Close"] - latest["EMA20"]) / latest["EMA20"]
     if dist_ema > 0:
-        score += min(dist_ema * 100, 15)
+        score += min(dist_ema * 100, 10)
 
-    # 🔹 RR
-    entry = latest["Close"]
-    stop = reds["Low"].min()
-    risk = entry - stop
-
-    if risk > 0:
-        tp = entry + 2 * risk
-        rr = (tp - entry) / risk
-        score += min((rr - 2) * 25, 10)
-
-    # 🔹 capitulation
     recent_low = ha["Low"].rolling(20).min().iloc[-1]
-    bounce = (entry - recent_low) / recent_low
+    bounce = (latest["Close"] - recent_low) / recent_low
     score += min(bounce * 100, 10)
 
     return round(score, 1)
@@ -166,7 +144,102 @@ def tea_analysis(score):
         return "Setup faible."
 
 # ===============================
-# MACRO AI
+# SECTOR
+# ===============================
+def get_sector(ticker):
+    try:
+        url = f"https://api.polygon.io/v3/reference/tickers/{ticker}?apiKey={POLYGON_API_KEY}"
+        r = requests.get(url)
+        data = r.json()
+        return data.get("results", {}).get("sic_description", "N/A")
+    except:
+        return "N/A"
+
+# ===============================
+# PROCESS
+# ===============================
+def process_ticker(ticker):
+
+    df = fetch_polygon(ticker)
+
+    if df is None or len(df) < 30:
+        return None
+
+    # 🔴 FILTRE QUALITÉ
+    price = df["Close"].iloc[-1]
+    volume = df["Volume"].iloc[-1]
+
+    if price < 2:
+        return None
+
+    if volume < 300000:
+        return None
+
+    ha = heikin_ashi(df)
+    ha["EMA20"] = ema(ha["Close"], 20)
+    ha["RSI"] = rsi(ha["Close"], 14)
+
+    reds = ha.iloc[-4:-1]
+    green = ha.iloc[-1]
+
+    if (
+        (reds["Close"] < reds["Open"]).sum() == 3
+        and green["Close"] > green["Open"]
+        and green["Close"] > reds.iloc[-1]["Close"]
+    ):
+
+        score = score_stock_elite(ha, df)
+        analysis = tea_analysis(score)
+        sector = get_sector(ticker)
+
+        return {
+            "Ticker": ticker,
+            "Score": score,
+            "Sector": sector,
+            "Analysis": analysis
+        }
+
+    return None
+
+# ===============================
+# LOAD UNIVERSE (FAST)
+# ===============================
+def load_universe_fast():
+
+    url = f"https://api.polygon.io/v3/reference/tickers?market=stocks&active=true&limit=1000&apiKey={POLYGON_API_KEY}"
+
+    tickers = []
+
+    try:
+        while url:
+            r = requests.get(url)
+            data = r.json()
+
+            for t in data.get("results", []):
+                tickers.append(t["ticker"])
+
+            url = data.get("next_url")
+
+            if url:
+                url += f"&apiKey={POLYGON_API_KEY}"
+
+        return tickers
+
+    except:
+        return []
+
+# ===============================
+# DISCORD
+# ===============================
+def send_discord(msg):
+    try:
+        r = requests.post(DISCORD_WEBHOOK, json={"content": msg}, timeout=5)
+        print("Discord status:", r.status_code)
+    except Exception as e:
+        print("Erreur Discord:", e)
+
+# ===============================
+# MACRO
 # ===============================
 def generate_macro(top7):
 
@@ -179,7 +252,7 @@ Tu es un analyste financier.
 Voici les meilleurs setups:
 {tickers}
 
-Donne UNE phrase courte décrivant le marché.
+Donne UNE phrase courte sur le marché.
 """
 
         response = client.chat.completions.create(
@@ -194,62 +267,32 @@ Donne UNE phrase courte décrivant le marché.
         return "Marché en phase de stabilisation avec opportunités de rebond."
 
 # ===============================
-# DISCORD
-# ===============================
-def send_discord(msg):
-    try:
-        r = requests.post(DISCORD_WEBHOOK, json={"content": msg}, timeout=5)
-        print("Discord status:", r.status_code)
-    except Exception as e:
-        print("Erreur Discord:", e)
-
-# ===============================
 # MAIN
 # ===============================
 def main():
 
-    print("Webhook:", DISCORD_WEBHOOK)
+    print("🚀 Chargement univers...")
+    tickers = load_universe_fast()
 
-    tickers = load_russell_universe()
+    print(f"Tickers: {len(tickers)}")
+
     results = []
 
-    print(f"Scan de {len(tickers)} tickers...")
+    with ThreadPoolExecutor(max_workers=10) as executor:
 
-    for i, ticker in enumerate(tickers):
+        futures = [executor.submit(process_ticker, t) for t in tickers]
 
-        df = fetch_polygon(ticker)
+        for i, future in enumerate(as_completed(futures)):
 
-        if df is not None and len(df) >= 30:
+            res = future.result()
 
-            ha = heikin_ashi(df)
-            ha["EMA20"] = ema(ha["Close"], 20)
-            ha["EMA200"] = ema(ha["Close"], 200)
-            ha["RSI"] = rsi(ha["Close"], 14)
+            if res:
+                results.append(res)
 
-            reds = ha.iloc[-4:-1]
-            green = ha.iloc[-1]
+            if i % 200 == 0:
+                print(f"{i} traités")
 
-            if (
-                (reds["Close"] < reds["Open"]).sum() == 3
-                and green["Close"] > green["Open"]
-                and green["Close"] > reds.iloc[-1]["Close"]
-            ):
-
-                score = score_stock_pro(ha)
-                analysis = tea_analysis(score)
-
-                results.append({
-                    "Ticker": ticker,
-                    "Score": score,
-                    "Analysis": analysis
-                })
-
-        if i % 50 == 0:
-            print(f"{i} tickers traités")
-
-        time.sleep(COOLDOWN)
-
-    print(f"Total setups trouvés: {len(results)}")
+    print(f"Total setups: {len(results)}")
 
     if len(results) > 0:
 
@@ -262,13 +305,15 @@ def main():
         report = f"🟫 TEA REVERSAL PRO\n\n🌍 {macro}\n\n"
 
         for _, row in df_results.iterrows():
-            report += f"{row['Ticker']} | {row['Score']}/100\n{row['Analysis']}\n\n"
+            report += f"{row['Ticker']} | {row['Score']}/100\n"
+            report += f"{row['Sector']}\n"
+            report += f"{row['Analysis']}\n\n"
 
         print(report)
         send_discord(report)
 
     else:
-        msg = "🟫 TEA REVERSAL\n\nAucun pattern détecté aujourd’hui."
+        msg = "🟫 Aucun setup aujourd’hui"
         print(msg)
         send_discord(msg)
 
