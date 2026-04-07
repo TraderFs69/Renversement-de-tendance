@@ -5,12 +5,12 @@ on:
     - cron: '15 0 * * 1-5'
   workflow_dispatch:
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout code
@@ -31,13 +31,4 @@ jobs:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          python bot.py
-
-      - name: Success
-        if: success()
-        run: echo "OK"
-
-      - name: Failure
-        if: failure()
-        run: echo "ERROR"
+        run: python bot.py
