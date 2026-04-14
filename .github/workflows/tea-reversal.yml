@@ -2,7 +2,8 @@ name: TEA Reversal Scanner
 
 on:
   schedule:
-    - cron: '15 0 * * 1-5'
+    - cron: '0 0 * * *'  # 20h Québec = 00h UTC
+    - cron: '0 23 * * *'  # ~20h Québec
   workflow_dispatch:
 
 jobs:
